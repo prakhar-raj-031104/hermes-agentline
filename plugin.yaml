@@ -1,0 +1,78 @@
+name: agentline
+label: AgentLine (phone)
+kind: platform
+version: 1.0.0
+manifest_version: 2
+api_version: 1
+description: >
+  A real phone number for Hermes. Place calls that a hosted voice carries out and get the
+  transcript back, send and receive SMS, text your agent like any other chat, and let a live
+  caller's question reach Hermes mid-call. Every call, text and number purchase asks for
+  approval first.
+author: AgentLine
+license: MIT
+homepage: https://github.com/prakhar-raj-031104/hermes-agentline
+tags: [phone, voice, sms, calls, gateway, telephony]
+requires_hermes: ">=0.23.0"
+provides_tools:
+  - agentline_status
+  - agentline_agent
+  - agentline_buy_number
+  - agentline_call
+  - agentline_call_result
+  - agentline_hangup
+  - agentline_sms
+  - agentline_messages
+  - agentline_contacts
+provides_hooks:
+  - pre_tool_call
+requires_env:
+  - name: AGENTLINE_API_KEY
+    description: "AgentLine API key (al_live_...)"
+    prompt: "AgentLine API key"
+    url: "https://agentline.cloud"
+    secret: true
+    password: true
+optional_env:
+  - name: AGENTLINE_AGENT_ID
+    description: "Agent whose number Hermes answers on (agt_...). Not needed when the account has one agent."
+    prompt: "AgentLine agent id (or empty)"
+    password: false
+  - name: AGENTLINE_ALLOWED_USERS
+    description: "Comma-separated phone numbers (E.164) allowed to text or call Hermes. Everyone else is ignored."
+    prompt: "Allowed phone numbers (comma-separated)"
+    password: false
+  - name: AGENTLINE_ALLOW_ALL_USERS
+    description: "Let any number that texts or calls drive the agent (testing only)."
+    prompt: "Allow every number? (true/false)"
+    password: false
+  - name: AGENTLINE_HOME_CHANNEL
+    description: "Phone number that receives cron and notification texts"
+    prompt: "Home phone number (or empty)"
+    password: false
+config_schema:
+  require_approval:
+    type: bool
+    default: true
+    label: Ask before calling or texting
+    description: Send every call, text and number purchase to Hermes's approval prompt.
+  allowed_numbers:
+    type: list
+    default: []
+    label: Allowed destinations
+    description: If set, Hermes may call and text only these numbers (E.164). Empty allows any US or Canadian number.
+  default_agent_id:
+    type: str
+    default: ""
+    label: Default agent
+    description: Agent (agt_...) the tools act as. Empty uses AGENTLINE_AGENT_ID, or the account's only agent.
+  daily_call_limit:
+    type: int
+    default: 20
+    label: Calls per day
+    description: Most calls the tools place per day. 0 removes the limit.
+  daily_sms_limit:
+    type: int
+    default: 50
+    label: Texts per day
+    description: Most texts the tools send per day (replies in a text conversation are not counted). 0 removes the limit.

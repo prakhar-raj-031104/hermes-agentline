@@ -1,0 +1,10 @@
+[project]
+name = "hermes-agentline"
+version = "1.0.0"
+description = "AgentLine phone calls and SMS for Hermes Agent"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = [
+    # The relay socket. Same range AgentLine's own connector supports; Hermes pins 15.x where it ships it.
+    "websockets>=12,<16",
+]
