@@ -23,8 +23,9 @@ AGENT = {
     "name": "agentline_agent",
     "description": (
         "Create or update the voice agent that speaks on calls: its name, default instructions, "
-        "greeting, voice, voicemail message and the owner's phone number. Free. A new agent "
-        "cannot call or text until it has a number from agentline_buy_number."
+        "greeting, voice, voicemail message and the owner's phone number. Free, but it changes what "
+        "every caller hears, so the user is asked for approval first. A new agent cannot call or text "
+        "until it has a number from agentline_buy_number."
     ),
     "parameters": {
         "type": "object",
@@ -77,9 +78,11 @@ CALL = {
             "to_number": _NUMBER,
             "objective": {
                 "type": "string",
-                "description": "Instructions for the voice on this call only: purpose, facts, limits, how to end.",
+                "description": "Instructions for the voice on this call only: purpose, facts, limits, how to end. "
+                               "At most 2,000 characters; the user reads all of it before approving.",
             },
-            "greeting": {"type": "string", "description": "Opening line for this call. Omit for the agent's default."},
+            "greeting": {"type": "string",
+                         "description": "Opening line for this call, at most 300 characters. Omit for the agent's default."},
             "agent_id": _AGENT_ID,
             "voice_id": {
                 "type": "string",

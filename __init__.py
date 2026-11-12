@@ -88,6 +88,7 @@ def _register_platform(ctx) -> None:
 def register(ctx) -> None:
     tools.bind_settings(ctx.get_config)
     tools.register_tools(ctx)
+    guard.bind_context(ctx)
     ctx.register_hook("pre_tool_call", guard.pre_tool_call)
     skill = Path(__file__).parent / "skills" / "agentline-phone" / "SKILL.md"
     ctx.register_skill("agentline-phone", skill)

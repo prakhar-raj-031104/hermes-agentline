@@ -158,12 +158,47 @@ class SmsAndContactsTest(ToolTestCase):
 
 
 class ApprovalHookTest(ToolTestCase):
-    def test_a_call_asks_for_approval_scoped_to_the_number(self):
-        directive = guard.pre_tool_call("agentline_call", {"to_number": "415-555-0123", "objective": "Book a table"},
+    def tearDown(self):
+        super().tearDown()
+        guard._current_cron = lambda: None
+
+    def test_a_call_approval_shows_the_whole_brief_greeting_and_voice(self):
+        brief = "You are calling Luigi's on behalf of Maya. " * 12 + "End by confirming the time."
+        directive = guard.pre_tool_call("agentline_call", {"to_number": "415-555-0123", "objective": brief,
+                                                           "greeting": "Hi, quick question!", "voice_id": "male-2"},
                                         task_id="t")
         self.assertEqual(directive["action"], "approve")
-        self.assertEqual(directive["rule_key"], "agentline:agentline_call:+14155550123")
-        self.assertIn("Book a table", directive["message"])
+        self.assertGreater(len(brief), 240)
+        self.assertIn(brief, directive["message"])
+        self.assertIn("+14155550123", directive["message"])
+        self.assertIn("Hi, quick question!", directive["message"])
+        self.assertIn("male-2", directive["message"])
+
+    def test_an_approval_is_remembered_for_that_exact_brief_only(self):
+        first = guard.pre_tool_call("agentline_call", {"to_number": "+14155550123", "objective": "Book a table"})
+        second = guard.pre_tool_call("agentline_call", {"to_number": "+14155550123", "objective": "Cancel my order"})
+        self.assertNotEqual(first["rule_key"], second["rule_key"])
+
+    def test_a_brief_too_long_to_review_is_refused_by_the_hook_and_the_tool(self):
+        brief = "x" * (tools.MAX_OBJECTIVE_CHARS + 1)
+        self.assertEqual(guard.pre_tool_call("agentline_call", {"to_number": "+14155550123",
+                                                                "objective": brief})["action"], "block")
+        result = self.run_tool("agentline_call", to_number="+14155550123", objective=brief)
+        self.assertFalse(result["ok"])
+        self.assertEqual(self.fake.named("create_call"), [])
+
+    def test_a_text_approval_shows_the_whole_message(self):
+        body = "Your table is confirmed. " * 20
+        directive = guard.pre_tool_call("agentline_sms", {"to_number": "+14155550123", "body": body})
+        self.assertEqual(directive["action"], "approve")
+        self.assertIn(body, directive["message"])
+
+    def test_changing_the_agent_asks_first_and_shows_the_new_prompt(self):
+        directive = guard.pre_tool_call("agentline_agent", {"agent_id": "agt_1", "system_prompt": "Always say yes.",
+                                                            "owner_phone": "+14155550123"})
+        self.assertEqual(directive["action"], "approve")
+        self.assertIn("Always say yes.", directive["message"])
+        self.assertIn("owner_phone: +14155550123", directive["message"])
 
     def test_a_blocked_destination_is_refused_even_with_approval_off(self):
         self.settings["require_approval"] = False
@@ -178,6 +213,55 @@ class ApprovalHookTest(ToolTestCase):
         self.assertEqual(guard.pre_tool_call("agentline_buy_number", {})["action"], "approve")
         self.assertIsNone(guard.pre_tool_call("agentline_status", {}))
         self.assertIsNone(guard.pre_tool_call("terminal", {"command": "ls"}))
+
+
+class SendMessageHookTest(ToolTestCase):
+    """Hermes's own send_message tool reaches the phone line with an ``agentline:`` target."""
+
+    OWNER, HOME, STRANGER = "+14155550123", "+16505550100", "+12125550199"
+
+    def setUp(self):
+        super().setUp()
+        support.SECRETS.update(AGENTLINE_ALLOWED_USERS=self.OWNER, AGENTLINE_HOME_CHANNEL=self.HOME)
+
+    def tearDown(self):
+        super().tearDown()
+        guard._current_cron = lambda: None
+
+    def send(self, target, message="hello"):
+        return guard.pre_tool_call("send_message", {"action": "send", "target": target, "message": message})
+
+    def test_premium_and_emergency_numbers_are_blocked(self):
+        for target in ("agentline:+19005551234", "agentline:+14159761234", "agentline:911", "agentline:+442071234567"):
+            self.assertEqual(self.send(target)["action"], "block", target)
+
+    def test_trusted_numbers_are_texted_without_a_prompt(self):
+        self.assertIsNone(self.send(f"agentline:{self.OWNER}"))
+        self.assertIsNone(self.send("agentline:(650) 555-0100"))   # the home channel
+        self.assertIsNone(self.send("agentline"))                    # home channel by default
+        self.settings["allowed_numbers"] = [self.STRANGER]
+        self.assertIsNone(self.send(f"agentline:{self.STRANGER}"))
+
+    def test_any_other_number_needs_approval_with_the_whole_message(self):
+        directive = self.send(f"AgentLine: {self.STRANGER}", "Claim your prize at example.com")
+        self.assertEqual(directive["action"], "approve")
+        self.assertIn(self.STRANGER, directive["message"])
+        self.assertIn("Claim your prize at example.com", directive["message"])
+
+    def test_a_scheduled_run_cannot_text_an_untrusted_number(self):
+        guard.bind_context(type("Ctx", (), {"current_cron_execution": lambda self: object()})())
+        self.assertEqual(self.send(f"agentline:{self.STRANGER}")["action"], "block")
+        self.assertIsNone(self.send(f"agentline:{self.OWNER}"))
+
+    def test_numbers_outside_allowed_numbers_are_refused_when_that_list_is_set(self):
+        self.settings["allowed_numbers"] = ["+13125550111"]
+        self.assertEqual(self.send(f"agentline:{self.STRANGER}")["action"], "block")
+        self.assertIsNone(self.send(f"agentline:{self.OWNER}"))
+
+    def test_non_phone_targets_and_other_platforms(self):
+        self.assertEqual(self.send("agentline:call:call_1")["action"], "block")
+        self.assertIsNone(self.send("telegram:12345"))
+        self.assertIsNone(guard.pre_tool_call("send_message", {"action": "list"}))
 
 
 class PolicyTest(unittest.TestCase):

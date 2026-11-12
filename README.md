@@ -46,7 +46,7 @@ AGENTLINE_ALLOWED_USERS=+14155550123
 ```
 
 ```bash
-hermes gateway
+hermes gateway run
 ```
 
 | Variable | Meaning |
@@ -71,7 +71,7 @@ is declined on the call without reaching Hermes.
 | Tool | What it does | Asks first |
 |---|---|---|
 | `agentline_status` | Balance, agents, numbers and today's usage | |
-| `agentline_agent` | Create or update the voice agent | |
+| `agentline_agent` | Create or update the voice agent | yes |
 | `agentline_buy_number` | Buy a US or Canadian number | yes |
 | `agentline_call` | Place a call and return the transcript | yes |
 | `agentline_call_result` | Status and transcript of a call, or recent calls | |
@@ -94,7 +94,7 @@ Hermes Desktop:
 | `allowed_numbers` | `[]` | If set, the only numbers Hermes may call or text. |
 | `default_agent_id` | `""` | Agent the tools act as. |
 | `daily_call_limit` | `20` | Most calls the tools place per day. `0` removes the limit. |
-| `daily_sms_limit` | `50` | Most texts the tools send per day. `0` removes the limit. |
+| `daily_sms_limit` | `50` | Most texts sent per day, counting tool texts, replies and `send_message`. `0` removes the limit. |
 
 ## What you should know before installing
 
@@ -105,12 +105,23 @@ Hermes Desktop:
   and produces the transcript; the plugin never handles audio.
 - **Money.** Calls, texts and numbers are billed to your AgentLine account. A reply in a text
   conversation is one billed SMS per 1,500 characters, at most three per reply.
-- **Approvals.** `agentline_call`, `agentline_sms` and `agentline_buy_number` return an `approve`
-  directive from a `pre_tool_call` hook, so Hermes's own approval gate decides. With nobody to
-  approve (cron, an unattended gateway) the gate fails closed and nothing is dialed. Replies to
-  an allowed person's text or call are not gated; they are the conversation itself.
+- **Approvals.** `agentline_call`, `agentline_sms`, `agentline_buy_number` and `agentline_agent`
+  return an `approve` directive from a `pre_tool_call` hook, so Hermes's own approval gate decides.
+  The prompt shows the whole call brief, opening line and voice, the whole text, or every agent
+  field being changed; a brief over 2,000 characters is refused, not cut short. An approval is
+  remembered for that exact content only. With nobody to approve (cron, an unattended gateway)
+  the gate fails closed and nothing is dialed.
+- **Hermes's `send_message`.** It can text through this plugin with a target like
+  `agentline:+14155551234`. Numbers in `AGENTLINE_ALLOWED_USERS`, the home channel and
+  `allowed_numbers` are texted without a prompt; any other number needs approval, and a scheduled
+  (cron) run is refused outright. Replies to an allowed person's text or call are not gated; they
+  are the conversation itself.
 - **Always refused.** Emergency and service codes (911, 411, ...), premium-rate numbers and
-  numbers outside the US and Canada are refused in the hook and again in the tool.
+  numbers outside the US and Canada are refused on every path: in the hook, in the tools, and in
+  the gateway's own send paths (replies, `send_message`, cron delivery). When `allowed_numbers`
+  is set, numbers outside it and outside the trusted set are refused there too.
+- **Daily limits.** Every text counts against `daily_sms_limit`, whichever path sends it, and every
+  call against `daily_call_limit`.
 - **Untrusted input.** Transcripts and message bodies come from other people. Tool results label
   them as information, not instructions, and the skill tells the agent the same. SMS sender
   numbers can be spoofed by a determined attacker, so keep Hermes's approval prompts on for

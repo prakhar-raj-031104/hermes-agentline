@@ -10,13 +10,19 @@ from typing import Any, Callable, Optional
 
 from . import schemas
 from .client import AGENT_ID_ENV, API_KEY_ENV, TERMINAL_CALL_STATUSES, AgentLineClient, AgentLineError, resolve_agent_id
-from .policy import destination_problem, normalize_number
+from .policy import destination_problem, normalize_number, number_list
 
 TOOLSET = "agentline"
 PLUGIN_NAME = "agentline"
 POLL_SECONDS = 3.0
 MAX_TRANSCRIPT_CHARS = 8000
 MAX_SMS_CHARS = 1500
+# Longest brief and greeting the voice may be given. The approval prompt shows them in full, so a
+# brief that is too long to read before approving is refused instead of being cut short.
+MAX_OBJECTIVE_CHARS = 2000
+MAX_GREETING_CHARS = 300
+ALLOWED_USERS_ENV = "AGENTLINE_ALLOWED_USERS"
+HOME_CHANNEL_ENV = "AGENTLINE_HOME_CHANNEL"
 
 DEFAULTS = {
     "require_approval": True,
@@ -45,6 +51,14 @@ def _secret(name: str) -> str:
     from agent.secret_scope import get_secret
 
     return (get_secret(name) or "").strip()
+
+
+def secret_or_empty(name: str) -> str:
+    """A secret, or "" when it is unset or no profile scope can be resolved here."""
+    try:
+        return _secret(name)
+    except Exception:  # an unscoped read under multiplexing: treat as unset, never borrow another profile's
+        return ""
 
 
 def has_api_key() -> bool:
@@ -114,22 +128,55 @@ def usage_today() -> dict:
     return {"calls": int((counts or {}).get("calls", 0)), "sms": int((counts or {}).get("sms", 0))}
 
 
-def _count(kind: str) -> None:
+def _count(kind: str, amount: int = 1) -> None:
     with _usage_lock:
         counts = usage_today()
-        counts[kind] += 1
+        counts[kind] += amount
         path = _usage_path()
         scratch = path.with_suffix(".tmp")
         scratch.write_text(json.dumps({_today(): counts}), encoding="utf-8")
         scratch.replace(path)
 
 
-def _over_limit(kind: str, limit_key: str) -> Optional[str]:
+def _over_limit(kind: str, limit_key: str, amount: int = 1) -> Optional[str]:
     limit = int(setting(limit_key))
     used = usage_today()[kind]
-    if limit > 0 and used >= limit:
+    if limit > 0 and used + amount > limit:
         return f"today's limit of {limit} {kind} is reached ({limit_key} in the plugin settings)"
     return None
+
+
+# -- outbound texts outside the tools (gateway replies, send_message, cron delivery) -------------
+
+
+def trusted_numbers(*extra: object, read_secret: Callable[[str], str] = secret_or_empty) -> frozenset:
+    """Numbers that may be texted without a prompt: AGENTLINE_ALLOWED_USERS, the home channel and
+    the ``allowed_numbers`` setting, plus any ``extra`` numbers the caller already knows are trusted."""
+    raw = [read_secret(ALLOWED_USERS_ENV), read_secret(HOME_CHANNEL_ENV), setting("allowed_numbers"), *extra]
+    return frozenset(number for item in raw for number in number_list(item if item else []))
+
+
+def text_problem(number: object, trusted: frozenset) -> Optional[str]:
+    """Why a text to ``number`` may not be sent outside the tools, or ``None``.
+
+    Emergency, premium-rate and non-US/Canada numbers are always refused. Anything outside the
+    trusted set must also be on ``allowed_numbers`` when that list is set. The approval for
+    untrusted numbers happens in the ``pre_tool_call`` hook, before ``send_message`` runs."""
+    problem = destination_problem(number)
+    if problem:
+        return problem
+    if normalize_number(number) in trusted:
+        return None
+    return destination_problem(number, setting("allowed_numbers"))
+
+
+def sms_budget_problem(segments: int) -> Optional[str]:
+    """Why ``segments`` more texts would exceed today's ``daily_sms_limit``, or ``None``."""
+    return _over_limit("sms", "daily_sms_limit", segments)
+
+
+def count_sms(segments: int) -> None:
+    _count("sms", segments)
 
 
 # -- handlers --------------------------------------------------------------------
@@ -215,6 +262,10 @@ def _call(args: dict) -> str:
     objective = str(args.get("objective") or "").strip()
     if not objective:
         return _fail("objective is required: the voice needs instructions for this call")
+    if len(objective) > MAX_OBJECTIVE_CHARS:
+        return _fail(f"objective is {len(objective)} characters; the limit is {MAX_OBJECTIVE_CHARS}")
+    if len(str(args.get("greeting") or "")) > MAX_GREETING_CHARS:
+        return _fail(f"greeting is longer than {MAX_GREETING_CHARS} characters")
     over = _over_limit("calls", "daily_call_limit")
     if over:
         return _fail(over)

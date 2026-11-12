@@ -8,6 +8,7 @@ from tests.support import FakeClient, MessageEvent, PlatformConfig, ProcessingOu
 adapter_mod = support.submodule("adapter")
 relay = support.submodule("relay")
 client_mod = support.submodule("client")
+tools_mod = support.submodule("tools")
 
 FINAL = {"notify": True}  # how the gateway marks the agent's reply
 OWNER = "+14155550123"
@@ -45,6 +46,11 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.socket = FakeSocket()
         self.adapter._socket = self.socket
         self.adapter._owner_phone = OWNER
+        self.settings = {}
+        tools_mod.bind_settings(lambda key, default=None: self.settings.get(key, default))
+        usage = support.DATA_DIR / "usage.json"
+        if usage.exists():
+            usage.unlink()
 
     async def finish(self, outcome=ProcessingOutcome.SUCCESS):
         inbound = self.adapter.inbound[-1]
@@ -92,6 +98,55 @@ class SmsTest(AdapterTestCase):
     async def test_heartbeat_is_answered(self):
         await self.adapter._on_frame(json.dumps({"type": "heartbeat"}))
         self.assertEqual(self.socket.frames, [{"type": "ping"}])
+
+
+class GatewaySendPolicyTest(AdapterTestCase):
+    """The gateway's own send paths apply the same rules as the tools."""
+
+    async def test_premium_numbers_are_refused_on_the_live_path(self):
+        for number in ("+19005551234", "+14159761234"):
+            result = await self.adapter.send(number, "hi")
+            self.assertFalse(result.success, number)
+        self.assertEqual(self.fake.named("send_sms"), [])
+
+    async def test_an_untrusted_number_outside_allowed_numbers_is_refused(self):
+        self.settings["allowed_numbers"] = ["+13125550111"]
+        self.assertFalse((await self.adapter.send(STRANGER, "hi")).success)
+        self.assertTrue((await self.adapter.send(OWNER, "hi")).success)   # an allowed user is still answered
+        self.assertEqual([c[1][1] for c in self.fake.named("send_sms")], [OWNER])
+
+    async def test_every_text_counts_against_the_daily_limit(self):
+        self.settings["daily_sms_limit"] = 4
+        self.assertTrue((await self.adapter.send(OWNER, "x" * 3000)).success)   # two texts
+        self.assertEqual(tools_mod.usage_today()["sms"], 2)
+        refused = await self.adapter.send(OWNER, "y" * 4000)                    # three more would exceed it
+        self.assertFalse(refused.success)
+        self.assertIn("limit", refused.error)
+        self.assertEqual(len(self.fake.named("send_sms")), 2)
+
+    async def test_the_cron_sender_applies_the_same_rules_and_count(self):
+        sent = []
+
+        class Client:
+            def __init__(self, key): pass
+            def send_sms(self, agent_id, number, body):
+                sent.append(number)
+                return {"id": "msg_1"}
+
+        real = adapter_mod.AgentLineClient
+        adapter_mod.AgentLineClient = Client
+        try:
+            config = PlatformConfig(extra={"agent_id": "agt_1"})
+            refused = await adapter_mod._standalone_send(config, "+19005551234", "hi")
+            self.assertIn("premium", refused["error"])
+            self.settings["allowed_numbers"] = ["+13125550111"]
+            self.assertIn("error", await adapter_mod._standalone_send(config, STRANGER, "hi"))
+            ok = await adapter_mod._standalone_send(config, OWNER, "hi")
+            self.assertTrue(ok["success"])
+        finally:
+            adapter_mod.AgentLineClient = real
+        self.assertEqual(sent, [OWNER])
+        self.assertEqual(tools_mod.usage_today()["sms"], 1)
 
 
 class LiveCallTest(AdapterTestCase):

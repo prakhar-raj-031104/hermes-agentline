@@ -28,7 +28,7 @@ from gateway.platforms.base import BasePlatformAdapter, SendResult
 from gateway.platforms.event import MessageEvent, MessageType, ProcessingOutcome
 from gateway.platforms.helpers import MessageDeduplicator, redact_phone, strip_markdown
 
-from . import relay
+from . import relay, tools
 from .client import AGENT_ID_ENV, API_KEY_ENV, WS_BASE, AgentLineClient, AgentLineError, resolve_agent_id
 from .policy import normalize_number, number_list
 
@@ -334,11 +334,29 @@ class AgentLineAdapter(BasePlatformAdapter):
     def format_message(self, content: str) -> str:
         return strip_markdown(content)
 
+    def _trusted(self) -> frozenset:
+        home = (getattr(self.config, "home_channel", None) or {})
+        home_id = home.get("chat_id") if isinstance(home, dict) else getattr(home, "chat_id", None)
+        return tools.trusted_numbers(sorted(self._allowed), home_id or "",
+                                     read_secret=lambda name: get_scoped_secret(name, "") or "")
+
     async def _send_sms(self, number: str, text: str) -> SendResult:
+        """Every text the gateway sends: replies, ``send_message`` and late call answers.
+
+        The same destination rules as the tools apply here, because ``send_message`` reaches this
+        method without going through them. Approval for numbers outside the trusted set happens in
+        the ``pre_tool_call`` hook; every text counts against ``daily_sms_limit``."""
+        problem = tools.text_problem(number, self._trusted())
+        chunks = _sms_chunks(text)
+        problem = problem or tools.sms_budget_problem(len(chunks))
+        if problem:
+            logger.warning("[%s] Refused a text to %s: %s", self.name, redact_phone(number), problem)
+            return SendResult(success=False, error=f"AgentLine: {problem}")
         message_id = None
         try:
-            for chunk in _sms_chunks(text):
+            for chunk in chunks:
                 sent = await asyncio.to_thread(self._client.send_sms, self._agent_id, number, chunk)
+                tools.count_sms(1)
                 message_id = sent.get("id") or message_id
         except AgentLineError as exc:
             logger.warning("[%s] Text to %s failed: %s", self.name, redact_phone(number), exc)
@@ -393,13 +411,21 @@ async def _standalone_send(pconfig, chat_id, message, *, thread_id=None, media_f
     number = normalize_number(chat_id)
     if not api_key or not number:
         return send_error(f"AgentLine text needs {API_KEY_ENV} and a US or Canadian number")
+    home = getattr(pconfig, "home_channel", None) or {}
+    home_id = home.get("chat_id") if isinstance(home, dict) else getattr(home, "chat_id", None)
+    trusted = tools.trusted_numbers(home_id or "", read_secret=lambda name: get_scoped_secret(name, "") or "")
+    chunks = _sms_chunks(strip_markdown(message))
+    problem = tools.text_problem(number, trusted) or tools.sms_budget_problem(len(chunks))
+    if problem:
+        return send_error(f"AgentLine: {problem}")
     client = AgentLineClient(api_key)
     extra = getattr(pconfig, "extra", {}) or {}
     try:
         agent_id = await asyncio.to_thread(resolve_agent_id, client, extra_or_secret(extra, "agent_id", AGENT_ID_ENV))
         sent: dict = {}
-        for chunk in _sms_chunks(strip_markdown(message)):
+        for chunk in chunks:
             sent = await asyncio.to_thread(client.send_sms, agent_id, number, chunk)
+            tools.count_sms(1)
     except AgentLineError as exc:
         return send_error(f"AgentLine text failed: {exc}")
     return {"success": True, "platform": PLATFORM, "chat_id": number, "message_id": sent.get("id")}
