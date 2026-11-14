@@ -115,6 +115,20 @@ class GatewaySendPolicyTest(AdapterTestCase):
         self.assertTrue((await self.adapter.send(OWNER, "hi")).success)   # an allowed user is still answered
         self.assertEqual([c[1][1] for c in self.fake.named("send_sms")], [OWNER])
 
+    async def test_an_empty_allowlist_means_deny_for_unconfigured_numbers(self):
+        result = await self.adapter.send(STRANGER, "hi")
+        self.assertFalse(result.success)
+        self.assertIn("allowed_numbers", result.error)
+        self.assertEqual(self.fake.named("send_sms"), [])
+        self.settings["allowed_numbers"] = [STRANGER]
+        self.assertTrue((await self.adapter.send(STRANGER, "hi")).success)
+
+    async def test_someone_who_texted_in_under_allow_all_can_be_answered(self):
+        self.adapter._allow_all = True
+        await self.adapter._on_frame(event("sms.received", from_number=STRANGER, body="hello"))
+        self.assertTrue((await self.adapter.send(STRANGER, "hi back")).success)
+        self.assertFalse((await self.adapter.send("+13125550111", "hi")).success)   # nobody else
+
     async def test_every_text_counts_against_the_daily_limit(self):
         self.settings["daily_sms_limit"] = 4
         self.assertTrue((await self.adapter.send(OWNER, "x" * 3000)).success)   # two texts
@@ -139,8 +153,7 @@ class GatewaySendPolicyTest(AdapterTestCase):
             config = PlatformConfig(extra={"agent_id": "agt_1"})
             refused = await adapter_mod._standalone_send(config, "+19005551234", "hi")
             self.assertIn("premium", refused["error"])
-            self.settings["allowed_numbers"] = ["+13125550111"]
-            self.assertIn("error", await adapter_mod._standalone_send(config, STRANGER, "hi"))
+            self.assertIn("allowed_numbers", (await adapter_mod._standalone_send(config, STRANGER, "hi"))["error"])
             ok = await adapter_mod._standalone_send(config, OWNER, "hi")
             self.assertTrue(ok["success"])
         finally:

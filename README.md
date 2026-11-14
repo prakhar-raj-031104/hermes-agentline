@@ -91,7 +91,7 @@ Hermes Desktop:
 | Key | Default | Meaning |
 |---|---|---|
 | `require_approval` | `true` | Send every call, text and number purchase to the approval prompt. |
-| `allowed_numbers` | `[]` | If set, the only numbers Hermes may call or text. |
+| `allowed_numbers` | `[]` | Extra numbers that scheduled jobs and `send_message` may text. When set, also the only numbers the tools may call or text. |
 | `default_agent_id` | `""` | Agent the tools act as. |
 | `daily_call_limit` | `20` | Most calls the tools place per day. `0` removes the limit. |
 | `daily_sms_limit` | `50` | Most texts sent per day, counting tool texts, replies and `send_message`. `0` removes the limit. |
@@ -110,16 +110,19 @@ Hermes Desktop:
   The prompt shows the whole call brief, opening line and voice, the whole text, or every agent
   field being changed; a brief over 2,000 characters is refused, not cut short. An approval is
   remembered for that exact content only. With nobody to approve (cron, an unattended gateway)
-  the gate fails closed and nothing is dialed.
-- **Hermes's `send_message`.** It can text through this plugin with a target like
-  `agentline:+14155551234`. Numbers in `AGENTLINE_ALLOWED_USERS`, the home channel and
-  `allowed_numbers` are texted without a prompt; any other number needs approval, and a scheduled
-  (cron) run is refused outright. Replies to an allowed person's text or call are not gated; they
-  are the conversation itself.
+  the gate fails closed and nothing is dialed. Inside a scheduled run, `agentline_call` and
+  `agentline_sms` are refused outright for numbers you did not configure.
+- **Texts sent outside the agentline tools only reach numbers you configured.** Hermes's
+  `send_message` (`agentline:+14155551234`), scheduled jobs (`cronjob_manage` with `deliver` or
+  `failure_deliver` set to `agentline:...`) and gateway replies can run unattended, so they only
+  text `AGENTLINE_ALLOWED_USERS`, the home channel and `allowed_numbers`. An empty `allowed_numbers`
+  means no other number, not any number. A job that would text any other number is refused when
+  the agent creates or updates it, and again when it fires. To schedule texts to someone new, add
+  them to `allowed_numbers`. Replies to someone who texted or called in are the conversation
+  itself and are allowed.
 - **Always refused.** Emergency and service codes (911, 411, ...), premium-rate numbers and
-  numbers outside the US and Canada are refused on every path: in the hook, in the tools, and in
-  the gateway's own send paths (replies, `send_message`, cron delivery). When `allowed_numbers`
-  is set, numbers outside it and outside the trusted set are refused there too.
+  numbers outside the US and Canada are refused on every path, even when they are listed: in the
+  hook, in the tools, and in the gateway's own send paths (replies, `send_message`, cron delivery).
 - **Daily limits.** Every text counts against `daily_sms_limit`, whichever path sends it, and every
   call against `daily_call_limit`.
 - **Untrusted input.** Transcripts and message bodies come from other people. Tool results label

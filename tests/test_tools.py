@@ -242,11 +242,10 @@ class SendMessageHookTest(ToolTestCase):
         self.settings["allowed_numbers"] = [self.STRANGER]
         self.assertIsNone(self.send(f"agentline:{self.STRANGER}"))
 
-    def test_any_other_number_needs_approval_with_the_whole_message(self):
+    def test_any_other_number_is_refused_because_an_empty_allowlist_means_deny(self):
         directive = self.send(f"AgentLine: {self.STRANGER}", "Claim your prize at example.com")
-        self.assertEqual(directive["action"], "approve")
-        self.assertIn(self.STRANGER, directive["message"])
-        self.assertIn("Claim your prize at example.com", directive["message"])
+        self.assertEqual(directive["action"], "block")
+        self.assertIn("allowed_numbers", directive["message"])
 
     def test_a_scheduled_run_cannot_text_an_untrusted_number(self):
         guard.bind_context(type("Ctx", (), {"current_cron_execution": lambda self: object()})())
@@ -262,6 +261,54 @@ class SendMessageHookTest(ToolTestCase):
         self.assertEqual(self.send("agentline:call:call_1")["action"], "block")
         self.assertIsNone(self.send("telegram:12345"))
         self.assertIsNone(guard.pre_tool_call("send_message", {"action": "list"}))
+
+
+class CronJobHookTest(ToolTestCase):
+    """A scheduled job can deliver its output as a text; it fires unattended."""
+
+    OWNER, HOME, STRANGER = "+14155550123", "+16505550100", "+12125550199"
+
+    def setUp(self):
+        super().setUp()
+        support.SECRETS.update(AGENTLINE_ALLOWED_USERS=self.OWNER, AGENTLINE_HOME_CHANNEL=self.HOME)
+
+    def tearDown(self):
+        super().tearDown()
+        guard._current_cron = lambda: None
+
+    def job(self, **args):
+        return guard.pre_tool_call("cronjob_manage", {"action": "create", "schedule": "0 9 * * *",
+                                                      "prompt": "Summarise the news", **args})
+
+    def test_a_job_cannot_be_scheduled_to_text_an_unconfigured_number(self):
+        for field in ("deliver", "failure_deliver"):
+            directive = self.job(**{field: f"agentline:{self.STRANGER}"})
+            self.assertEqual(directive["action"], "block", field)
+            self.assertIn(field, directive["message"])
+        self.assertEqual(self.job(deliver=f"origin,agentline:{self.STRANGER}")["action"], "block")
+        self.assertEqual(self.job(deliver=["telegram", f"agentline:{self.STRANGER}"])["action"], "block")
+        self.assertEqual(guard.pre_tool_call("cronjob_manage", {"action": "update", "job_id": "j1",
+                                                                "deliver": f"agentline:{self.STRANGER}"})["action"], "block")
+
+    def test_premium_numbers_are_refused_even_when_listed(self):
+        self.settings["allowed_numbers"] = ["+19005551234"]
+        self.assertEqual(self.job(deliver="agentline:+19005551234")["action"], "block")
+
+    def test_configured_numbers_and_other_targets_are_allowed(self):
+        self.assertIsNone(self.job(deliver=f"agentline:{self.OWNER}"))
+        self.assertIsNone(self.job(deliver="agentline"))                 # the home channel
+        self.assertIsNone(self.job(deliver=f"agentline:{self.HOME}:1"))
+        self.assertIsNone(self.job(deliver="telegram:-100123,local"))
+        self.settings["allowed_numbers"] = [self.STRANGER]
+        self.assertIsNone(self.job(deliver=f"agentline:{self.STRANGER}"))
+        self.assertIsNone(guard.pre_tool_call("cronjob_manage", {"action": "list"}))
+        self.assertIsNone(guard.pre_tool_call("cronjob_manage", {"action": "remove", "job_id": "j1"}))
+
+    def test_a_scheduled_run_cannot_call_or_text_an_unconfigured_number_with_the_tools(self):
+        guard.bind_context(type("Ctx", (), {"current_cron_execution": lambda self: object()})())
+        self.assertEqual(guard.pre_tool_call("agentline_sms", {"to_number": self.STRANGER, "body": "hi"})["action"], "block")
+        self.assertEqual(guard.pre_tool_call("agentline_call", {"to_number": self.STRANGER, "objective": "x"})["action"], "block")
+        self.assertEqual(guard.pre_tool_call("agentline_sms", {"to_number": self.OWNER, "body": "hi"})["action"], "approve")
 
 
 class PolicyTest(unittest.TestCase):

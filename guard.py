@@ -3,10 +3,13 @@
 * ``agentline_call``, ``agentline_sms`` and ``agentline_buy_number`` go to Hermes's approval gate,
   with the full call brief, greeting, voice or message body in the prompt.
 * ``agentline_agent`` changes what every caller hears, so it asks first as well.
-* Hermes's own ``send_message`` tool can reach the phone line with a target like
-  ``agentline:+14155551234``. Numbers the user trusts (AGENTLINE_ALLOWED_USERS, the home channel,
-  ``allowed_numbers``) are texted without a prompt; any other number needs approval, and a
-  scheduled (cron) run is refused outright, since nobody is there to approve it.
+* Hermes's own ``send_message`` tool and scheduled jobs (``cronjob_manage`` with
+  ``deliver``/``failure_deliver`` set to ``agentline:+1...``) can text through the phone line.
+  Those texts only go to numbers the user configured (AGENTLINE_ALLOWED_USERS, the home channel,
+  ``allowed_numbers``); any other number is refused here, and again in the gateway when the text
+  is sent, so a job can never be scheduled to text a stranger.
+* Inside a scheduled run, ``agentline_call`` and ``agentline_sms`` are refused for numbers the
+  user did not configure, since nobody is there to approve them.
 
 Emergency codes, premium-rate numbers and numbers outside the US and Canada are refused on every
 path. Hermes's approval gate fails closed when nobody can answer.
@@ -54,8 +57,17 @@ def _block(reason: str) -> dict:
     return {"action": "block", "message": f"AgentLine: {reason}."}
 
 
+def _unattended_problem(to_number: object) -> Optional[str]:
+    """Inside a scheduled run nobody can approve, so only configured numbers may be reached."""
+    if _in_cron() and normalize_number(to_number) not in trusted_numbers():
+        return ("a scheduled run cannot call or text a number outside AGENTLINE_ALLOWED_USERS, the "
+                "home channel and allowed_numbers, because nobody is there to approve it")
+    return None
+
+
 def _call_directive(args: dict) -> Optional[dict]:
-    problem = destination_problem(args.get("to_number"), setting("allowed_numbers"))
+    problem = destination_problem(args.get("to_number"), setting("allowed_numbers")) \
+        or _unattended_problem(args.get("to_number"))
     if problem:
         return _block(problem)
     objective = str(args.get("objective") or "").strip()
@@ -74,7 +86,8 @@ def _call_directive(args: dict) -> Optional[dict]:
 
 
 def _sms_directive(args: dict) -> Optional[dict]:
-    problem = destination_problem(args.get("to_number"), setting("allowed_numbers"))
+    problem = destination_problem(args.get("to_number"), setting("allowed_numbers")) \
+        or _unattended_problem(args.get("to_number"))
     if problem:
         return _block(problem)
     if not setting("require_approval"):
@@ -93,30 +106,39 @@ def _agent_directive(args: dict) -> Optional[dict]:
     return _approve("agentline_agent", "\n".join(lines))
 
 
-def _send_message_directive(args: dict) -> Optional[dict]:
-    """Hermes's ``send_message`` with an ``agentline:`` target texts a real phone number."""
-    platform, _, ref = str(args.get("target") or "").strip().partition(":")
+def _agentline_target_problem(target: object) -> Optional[str]:
+    """Why an ``agentline:...`` delivery target may not be used, ``None`` when it may, or when the
+    target belongs to another platform. A bare ``agentline`` means the home channel."""
+    platform, _, ref = str(target or "").strip().partition(":")
     if platform.strip().lower() != PLATFORM_PREFIX:
         return None
-    ref = ref.strip()
+    ref = ref.strip().split(":", 1)[0].strip()   # agentline:<number>[:<thread>]
     if not ref:
-        return None  # the home channel, which the user configured
+        return None
     number = normalize_number(ref)
     if not number:
-        return _block("send_message can only text a US or Canadian number, for example agentline:+14155551234")
-    trusted = trusted_numbers()
-    problem = text_problem(number, trusted)
-    if problem:
-        return _block(problem)
-    if number in trusted:
+        return "only a US or Canadian number can be texted, for example agentline:+14155551234"
+    return text_problem(number, trusted_numbers())
+
+
+def _send_message_directive(args: dict) -> Optional[dict]:
+    """Hermes's ``send_message`` with an ``agentline:`` target texts a real phone number."""
+    problem = _agentline_target_problem(args.get("target"))
+    return _block(f"send_message: {problem}") if problem else None
+
+
+def _cron_directive(args: dict) -> Optional[dict]:
+    """A scheduled job that delivers to ``agentline:<number>`` texts it at fire time, unattended."""
+    if str(args.get("action") or "").strip().lower() not in ("create", "update"):
         return None
-    if _in_cron():
-        return _block("a scheduled run cannot text a number outside AGENTLINE_ALLOWED_USERS, the home "
-                      "channel and allowed_numbers, because nobody is there to approve it")
-    if not setting("require_approval"):
-        return None
-    return _approve("send_message", f"Send a text message to {number}, which is not on your AgentLine "
-                                    f"allowlist:\n{str(args.get('message') or '')}")
+    for field in ("deliver", "failure_deliver"):
+        value = args.get(field)
+        parts = value if isinstance(value, (list, tuple)) else str(value or "").split(",")
+        for part in parts:
+            problem = _agentline_target_problem(part)
+            if problem:
+                return _block(f"cron job {field} {str(part).strip()}: {problem}")
+    return None
 
 
 _DIRECTIVES = {
@@ -124,6 +146,7 @@ _DIRECTIVES = {
     "agentline_sms": _sms_directive,
     "agentline_agent": _agent_directive,
     "send_message": _send_message_directive,
+    "cronjob_manage": _cron_directive,
 }
 
 

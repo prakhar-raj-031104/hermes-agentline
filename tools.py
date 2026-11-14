@@ -150,24 +150,27 @@ def _over_limit(kind: str, limit_key: str, amount: int = 1) -> Optional[str]:
 
 
 def trusted_numbers(*extra: object, read_secret: Callable[[str], str] = secret_or_empty) -> frozenset:
-    """Numbers that may be texted without a prompt: AGENTLINE_ALLOWED_USERS, the home channel and
-    the ``allowed_numbers`` setting, plus any ``extra`` numbers the caller already knows are trusted."""
+    """Numbers the user configured: AGENTLINE_ALLOWED_USERS, the home channel and the
+    ``allowed_numbers`` setting, plus any ``extra`` numbers the caller already knows are trusted."""
     raw = [read_secret(ALLOWED_USERS_ENV), read_secret(HOME_CHANNEL_ENV), setting("allowed_numbers"), *extra]
     return frozenset(number for item in raw for number in number_list(item if item else []))
 
 
-def text_problem(number: object, trusted: frozenset) -> Optional[str]:
-    """Why a text to ``number`` may not be sent outside the tools, or ``None``.
+NOT_CONFIGURED = ("this number is not in AGENTLINE_ALLOWED_USERS, the home channel or allowed_numbers; "
+                  "texts outside the agentline tools only go to numbers you configured")
 
-    Emergency, premium-rate and non-US/Canada numbers are always refused. Anything outside the
-    trusted set must also be on ``allowed_numbers`` when that list is set. The approval for
-    untrusted numbers happens in the ``pre_tool_call`` hook, before ``send_message`` runs."""
+
+def text_problem(number: object, trusted: frozenset) -> Optional[str]:
+    """Why a text to ``number`` may not be sent outside the agentline tools, or ``None``.
+
+    These paths (gateway replies, Hermes's ``send_message``, cron delivery) can run unattended, so
+    they only reach numbers the user configured: an empty allowlist means deny. Emergency,
+    premium-rate and non-US/Canada numbers are refused even when listed. The agentline tools
+    themselves can still reach other numbers, through Hermes's approval prompt."""
     problem = destination_problem(number)
     if problem:
         return problem
-    if normalize_number(number) in trusted:
-        return None
-    return destination_problem(number, setting("allowed_numbers"))
+    return None if normalize_number(number) in trusted else NOT_CONFIGURED
 
 
 def sms_budget_problem(segments: int) -> Optional[str]:

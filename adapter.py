@@ -70,6 +70,9 @@ class AgentLineAdapter(BasePlatformAdapter):
         self._agent_id: str = extra_or_secret(extra, "agent_id", AGENT_ID_ENV)
         self._allow_all: bool = str(get_scoped_secret(ALLOW_ALL_ENV, "") or "").strip().lower() in _TRUTHY
         self._allowed: frozenset = frozenset(number_list(get_scoped_secret(ALLOWED_USERS_ENV, "") or ""))
+        # People who texted or called in and were let through. Only matters with ALLOW_ALL_USERS (testing):
+        # their replies are allowed, while every other unconfigured number is still refused.
+        self._partners: set = set()
         self._client = AgentLineClient(self._api_key)
         self._owner_phone = ""
         self._socket: Any = None
@@ -219,6 +222,7 @@ class AgentLineAdapter(BasePlatformAdapter):
             logger.info("[%s] Ignored a text from %s (not in %s)", self.name,
                         redact_phone(sms.from_number), ALLOWED_USERS_ENV)
             return
+        self._partners.add(sms.from_number)
         await self._dispatch(chat_id=sms.from_number, sender=sms.from_number, text=sms.body,
                              message_id=sms.message_id, raw=event)
 
@@ -255,6 +259,8 @@ class AgentLineAdapter(BasePlatformAdapter):
                         redact_phone(turn.caller), ALLOWED_USERS_ENV)
             await self._settle(turn, "failed", "I can't look that up for this caller.")
             return
+        if turn.caller:
+            self._partners.add(turn.caller)
         previous = self._turns.get(turn.call_id)
         if previous is not None and not previous.settled:
             await self._settle(previous, None, "")  # the caller moved on to a new question
@@ -337,15 +343,15 @@ class AgentLineAdapter(BasePlatformAdapter):
     def _trusted(self) -> frozenset:
         home = (getattr(self.config, "home_channel", None) or {})
         home_id = home.get("chat_id") if isinstance(home, dict) else getattr(home, "chat_id", None)
-        return tools.trusted_numbers(sorted(self._allowed), home_id or "",
+        return tools.trusted_numbers(sorted(self._allowed), sorted(self._partners), home_id or "",
                                      read_secret=lambda name: get_scoped_secret(name, "") or "")
 
     async def _send_sms(self, number: str, text: str) -> SendResult:
-        """Every text the gateway sends: replies, ``send_message`` and late call answers.
+        """Every text the gateway sends: replies, ``send_message``, cron delivery and late call answers.
 
-        The same destination rules as the tools apply here, because ``send_message`` reaches this
-        method without going through them. Approval for numbers outside the trusted set happens in
-        the ``pre_tool_call`` hook; every text counts against ``daily_sms_limit``."""
+        These paths can run unattended (a scheduled job delivers here at fire time), so they only text
+        numbers the user configured, or someone already talking to the agent; an empty allowlist means
+        deny. Every text counts against ``daily_sms_limit``."""
         problem = tools.text_problem(number, self._trusted())
         chunks = _sms_chunks(text)
         problem = problem or tools.sms_budget_problem(len(chunks))
